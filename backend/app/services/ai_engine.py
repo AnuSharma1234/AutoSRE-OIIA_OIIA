@@ -1,12 +1,12 @@
 import os
 import json
 import asyncio
-from google import genai
+import google.generativeai as genai
 from app.schemas.analysis import AIAnalysisResponse, RiskLevel
 from app.schemas.incident import AlertType, K8sContext
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GEMENI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
 TIMEOUT_SECONDS = 60
 MAX_RETRIES = 3
 
@@ -29,6 +29,7 @@ Rules:
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY environment variable is not set")
 
+genai.configure(api_key=GEMINI_API_KEY)
 
 def _build_prompt(alert_type: str, cluster_id: str, metadata: dict, context: K8sContext) -> str:
     """Build the user prompt for Gemini."""
@@ -74,25 +75,24 @@ async def analyze_incident(
     Returns AIAnalysisResponse with root_cause, suggested_action, kubectl_command, confidence_score, risk_level.
     Falls back to safe defaults on error.
     """
-    client = genai.Client(api_key=GEMINI_API_KEY)
-
     alert_type = incident_data.get("alert_type", "UNKNOWN")
     cluster_id = incident_data.get("cluster_id", "unknown")
     metadata = incident_data.get("metadata", {})
     user_prompt = _build_prompt(alert_type, cluster_id, metadata, k8s_context)
 
+    model = genai.GenerativeModel(
+        model_name=GEMINI_MODEL,
+        system_instruction=SYSTEM_PROMPT,
+    )
+
     for attempt in range(MAX_RETRIES):
         try:
             response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    client.models.generate_content,
-                    model=GEMINI_MODEL,
-                    contents=user_prompt,
-                    config=genai.types.GenerateContentConfig(
-                        system_instruction=SYSTEM_PROMPT,
-                        max_output_tokens=1024,
-                        temperature=0.2,
-                    ),
+                model.generate_content_async(
+                    user_prompt,
+                    generation_config=genai.types.GenerationConfig(
+                        temperature=0.0,
+                    )
                 ),
                 timeout=TIMEOUT_SECONDS,
             )
@@ -100,9 +100,7 @@ async def analyze_incident(
             raw_text = response.text.strip()
             # Strip markdown code blocks if present
             if raw_text.startswith("```"):
-                lines = raw_text.split("\n")
-                # Remove first line (```json) and last line (```)
-                raw_text = "\n".join(lines[1:-1])
+                raw_text = "\n".join(raw_text.split("\n")[1:-1])
 
             data = json.loads(raw_text)
 
