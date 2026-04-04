@@ -13,6 +13,7 @@ AutoSRE is a self-service platform that automatically handles Kubernetes cluster
 - **Manual approval workflow for medium/high-risk actions** — dashboard modal for human review before execution
 - **Full audit logging** — every alert, analysis, and action is recorded with timestamps
 - **Next.js dashboard** — incident list, detail view with AI analysis, cluster overview
+- **Error Trigger Service (Event Poller)** — [Detailed Service Documentation](backend/TRIGGER_SERVICE.md)
 
 ## Architecture
 

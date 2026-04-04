@@ -1,139 +1,122 @@
 import uuid
-import hashlib
-from datetime import datetime
-from fastapi import APIRouter, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel
-from app.core.database import get_db
-from app.models.incident import Incident
-from app.schemas.incident import AlertType, IncidentStatus
-from app.core.redis import enqueue_task
+import logging
+import asyncio
+from datetime import datetime, timezone
+from typing import Any
+
+from fastapi import APIRouter, Header, HTTPException, Request
+from app.config import settings
+from app.services.event_poller import _write_to_spacetimedb, _trigger_superplane, _safe_serialize
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Prometheus alert name to AlertType mapping
+# ---------------------------------------------------------------------------
+# AlertManager → alert_type mapping
+# ---------------------------------------------------------------------------
 ALERT_NAME_MAP = {
-    "KubePodCrashLoopBackOff": AlertType.CRASHLOOP,
-    "KubePodNotReady": AlertType.OOMKILLED,  # Will be refined by AI
-    "KubeDeploymentReplicasMismatch": AlertType.FAILED_DEPLOYMENT,
-    "KubePodPending": AlertType.PENDING_POD,
-    "KubeImagePullBackOff": AlertType.IMAGE_PULL_ERROR,
-    "KubePodOOMKilled": AlertType.OOMKILLED,
+    "KubePodCrashLooping": "CRASH_LOOP_BACKOFF",
+    "KubePodNotReady": "POD_NOT_READY",
+    "KubeContainerOOMKilled": "OOM_KILLED",
+    "KubeDeploymentRolloutStuck": "DEPLOYMENT_FAILED",
+    "KubePodPending": "POD_PENDING",
 }
 
-DEDUP_WINDOW_SECONDS = 300  # 5 minutes
+
+def _map_alert_name(alertname: str) -> str:
+    """Map AlertManager alert name to normalized alert_type."""
+    return ALERT_NAME_MAP.get(alertname, "UNKNOWN")
 
 
-def _map_alert_name(alertname: str) -> AlertType:
-    """Map Prometheus alert name to AlertType enum."""
-    return ALERT_NAME_MAP.get(alertname, AlertType.UNKNOWN)
+# ---------------------------------------------------------------------------
+# Severity heuristic
+# ---------------------------------------------------------------------------
+SEVERITY_MAP = {
+    "critical": "critical",
+    "warning": "warning",
+    "info": "info",
+}
 
 
-def _get_dedup_key(alertname: str, namespace: str, pod_name: str) -> str:
-    """Generate deduplication key."""
-    key_string = f"{alertname}:{namespace}:{pod_name}"
-    return hashlib.sha256(key_string.encode()).hexdigest()[:16]
-
-
-async def _check_dedup(dedup_key: str) -> str | None:
-    """Check if this alert was seen recently. Returns incident_id if duplicate."""
-    from app.core.redis import redis_client
-    existing = await redis_client.get(f"autosre:dedup:{dedup_key}")
-    if existing:
-        return existing.decode() if isinstance(existing, bytes) else existing
-    return None
-
-
-async def _set_dedup(dedup_key: str, incident_id: str):
-    """Set dedup key with TTL."""
-    from app.core.redis import redis_client
-    await redis_client.setex(f"autosre:dedup:{dedup_key}", DEDUP_WINDOW_SECONDS, incident_id)
-
-
-class PrometheusAlert(BaseModel):
-    status: str
-    labels: dict
-    annotations: dict | None = None
-    startsAt: str | None = None
-    endsAt: str | None = None
-
-
-class PrometheusWebhookPayload(BaseModel):
-    alerts: list[PrometheusAlert]
-
-
-@router.post("/prometheus")
-async def prometheus_webhook(
-    payload: PrometheusWebhookPayload,
-    db: AsyncSession = Depends(get_db),
+@router.post("/alertmanager")
+async def alertmanager_webhook(
+    request: Request,
+    x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret"),
 ):
     """
-    Receive Prometheus Alertmanager webhook notifications.
-    Creates incidents for firing alerts, with 5-minute deduplication.
+    Prometheus AlertManager Webhook Receiver.
+    Validates secret, normalizes alerts, and writes to SpacetimeDB.
     """
-    created_incidents = []
-    skipped_incidents = []
+    # 1. Validate Secret
+    if not settings.alertmanager_webhook_secret:
+        logger.warning("ALERTMANAGER_WEBHOOK_SECRET not configured. Validation skipped.")
+    elif x_webhook_secret != settings.alertmanager_webhook_secret:
+        logger.error(f"Invalid webhook secret received: {x_webhook_secret}")
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
-    for alert in payload.alerts:
-        # Skip resolved alerts
-        if alert.status != "firing":
-            skipped_incidents.append({"alert": alert.labels.get("alertname"), "reason": "resolved"})
-            continue
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        logger.error(f"Failed to parse AlertManager JSON: {exc}")
+        raise HTTPException(status_code=400, detail="Invalid JSON")
 
-        alertname = alert.labels.get("alertname", "unknown")
-        namespace = alert.labels.get("namespace", alert.labels.get("kubernetes_namespace", "default"))
-        pod_name = alert.labels.get("pod", alert.labels.get("exported_pod", ""))
-        cluster_id = alert.labels.get("cluster", "default")
+    # AlertManager v2 payload standard has an 'alerts' list
+    alerts = payload.get("alerts", [])
+    if not alerts:
+        return {"status": "ok", "message": "No alerts found in payload"}
 
+    for alert in alerts:
+        labels = alert.get("labels", {})
+        alertname = labels.get("alertname", "unknown")
+        namespace = labels.get("namespace", labels.get("kubernetes_namespace", "default"))
+        pod_name = labels.get("pod", labels.get("exported_pod", ""))
+        container_name = labels.get("container", "")
+        severity_label = labels.get("severity", "warning").lower()
+        
+        # Mapping
         alert_type = _map_alert_name(alertname)
-        dedup_key = _get_dedup_key(alertname, namespace, pod_name)
-
-        # Check deduplication
-        existing_incident_id = await _check_dedup(dedup_key)
-        if existing_incident_id:
-            skipped_incidents.append({"alert": alertname, "incident_id": existing_incident_id, "reason": "duplicate"})
-            continue
-
-        # Create incident
+        severity = SEVERITY_MAP.get(severity_label, "warning")
         incident_id = str(uuid.uuid4())
-        extra_data = {
-            "alertname": alertname,
+        
+        # Detected at (AlertManager startsAt)
+        starts_at = alert.get("startsAt")
+        if starts_at:
+            detected_at = starts_at
+        else:
+            detected_at = datetime.now(timezone.utc).isoformat()
+
+        # Normalize
+        normalized = {
+            "incident_id": incident_id,
+            "alert_type": alert_type,
+            "source": "prometheus",
+            "cluster_id": "local",  # User specified "local" for Docker Desktop/Default
             "namespace": namespace,
             "pod_name": pod_name,
-            "description": alert.annotations.get("description", "") if alert.annotations else "",
-            "summary": alert.annotations.get("summary", "") if alert.annotations else "",
-            "severity": alert.labels.get("severity", "warning"),
-            "starts_at": alert.startsAt,
+            "container_name": container_name,
+            "severity": severity,
+            "raw_payload": _safe_serialize(alert),
+            "detected_at": detected_at,
         }
 
-        incident = Incident(
-            id=uuid.UUID(incident_id),
-            alert_type=alert_type.value,
-            cluster_id=cluster_id,
-            status=IncidentStatus.PENDING.value,
-            extra_data=extra_data,
-            created_at=datetime.utcnow(),
-            attempt_count="0",
-        )
-        db.add(incident)
-        await db.commit()
+        logger.info(f"Prometheus alert received: incident_id={incident_id} alert={alertname} type={alert_type}")
 
-        # Set dedup key
-        await _set_dedup(dedup_key, incident_id)
+        # Write to SpacetimeDB (reducer create_incident)
+        # Note: _write_to_spacetimedb handles retries internally.
+        # We don't await it to block the response if there are many alerts, 
+        # but the requirement says "Respond with 200 immediately after writing to SpacetimeDB".
+        # This implies we should at least try once.
+        success = await _write_to_spacetimedb(normalized)
+        
+        if success:
+            # Trigger Superplane
+            asyncio.create_task(
+                _trigger_superplane(
+                    incident_id, alert_type, namespace, pod_name
+                )
+            )
+        else:
+            logger.error(f"Failed to write Prometheus alert to SpacetimeDB: {incident_id}")
 
-        # Enqueue analysis task
-        await enqueue_task(incident_id, "analyze")
-
-        created_incidents.append({
-            "incident_id": incident_id,
-            "alert_type": alert_type.value,
-            "cluster_id": cluster_id,
-        })
-
-    return {
-        "status": "accepted",
-        "created": len(created_incidents),
-        "skipped": len(skipped_incidents),
-        "incident_ids": [i["incident_id"] for i in created_incidents],
-        "skipped_detail": skipped_incidents[:10],  # Limit detail
-    }
+    return {"status": "ok"}

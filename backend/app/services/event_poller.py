@@ -229,7 +229,11 @@ def _safe_serialize(obj: Any) -> dict:
     try:
         if hasattr(obj, "to_dict"):
             return obj.to_dict()
-        return json.loads(json.dumps(obj, default=str))
+        # Ensure it's actually a dict. json.dumps(obj, default=str) can return a quoted string.
+        serialized = json.loads(json.dumps(obj, default=str))
+        if isinstance(serialized, dict):
+            return serialized
+        return {"_raw": str(serialized)}
     except Exception:
         return {"_raw": str(obj)}
 
