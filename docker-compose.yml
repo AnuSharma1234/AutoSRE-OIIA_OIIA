@@ -42,18 +42,6 @@ services:
       REDIS_URL: redis://redis:6379
       KUBECONFIG: /root/.kube/config
       ENVIRONMENT: ${ENVIRONMENT:-development}
-      # --- Event Poller / Trigger Service ---
-      SPACETIMEDB_URL: ${SPACETIMEDB_URL:-}
-      SPACETIMEDB_MODULE: ${SPACETIMEDB_MODULE:-}
-      SPACETIMEDB_TOKEN: ${SPACETIMEDB_TOKEN:-}
-      K8S_NAMESPACE: ${K8S_NAMESPACE:-default}
-      K8S_IN_CLUSTER: ${K8S_IN_CLUSTER:-false}
-      PROMETHEUS_URL: ${PROMETHEUS_URL:-}
-      ALERTMANAGER_WEBHOOK_SECRET: ${ALERTMANAGER_WEBHOOK_SECRET:-}
-      SUPERPLANE_WEBHOOK_URL: ${SUPERPLANE_WEBHOOK_URL:-}
-      SUPERPLANE_API_KEY: ${SUPERPLANE_API_KEY:-}
-      SERVICE_PORT: ${SERVICE_PORT:-8001}
-      LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
       - "8000:8000"
     volumes:

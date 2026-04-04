@@ -13,19 +13,5 @@ class Settings(BaseSettings):
     auto_execute_low_threshold: float = 0.9
     auto_execute_medium_threshold: float = 0.9
 
-    # --- Trigger Service / Event Poller ---
-    spacetimedb_url: str = ""
-    spacetimedb_module: str = ""
-    spacetimedb_token: str = ""
-    k8s_namespace: str = "default"
-    k8s_in_cluster: str = "false"
-    prometheus_url: str = ""
-    alertmanager_webhook_secret: str = ""
-    superplane_webhook_url: str = ""
-    superplane_api_key: str = ""
-    service_port: int = 8001
-    log_level: str = "info"
-
 
 settings = Settings()
-
