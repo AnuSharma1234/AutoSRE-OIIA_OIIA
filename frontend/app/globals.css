@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+@theme {
+  /* Strict Palette Names */
+  --color-page: #0D1117;
+  --color-card: #161B22;
+  --color-border-line: #30363D;
+  --color-text-main: #E6EDF3;
+  --color-text-muted: #848D97;
+  --color-critical: #F85149;
+  --color-warning: #D29922;
+  --color-info: #58A6FF;
+  --color-resolved: #3FB950;
+  
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  
+  /* Shadcn Backward Compatibility Aliases (Strictly Linked to the Palette) */
+  --color-background: #0D1117;
+  --color-foreground: #E6EDF3;
+  
+  --color-popover: #161B22;
+  --color-popover-foreground: #E6EDF3;
+  
+  --color-primary: #161B22;
+  --color-primary-foreground: #E6EDF3;
+  
+  --color-secondary: #0d1117;
+  --color-secondary-foreground: #E6EDF3;
+  
+  --color-muted: #161B22;
+  --color-muted-foreground: #848D97;
+  
+  --color-accent: #30363D;
+  --color-accent-foreground: #E6EDF3;
+  
+  --color-destructive: #F85149;
+  --color-destructive-foreground: #E6EDF3;
+  
+  --color-border: #30363D;
+  --color-input: #30363D;
+  --color-ring: #58A6FF;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+  }
+  * {
+    border-color: var(--color-border);
+  }
+}
+
+.fade-in-row {
+  animation: fadeInRow 0.5s ease-in;
+}
+
+@keyframes fadeInRow {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
